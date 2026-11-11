@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terraria: Zombie Parkour Survival</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #0b0d12; font-family: sans-serif; color: #fff; }
+        #canvas-container { position: relative; width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        canvas { background: #1a233a; display: block; image-rendering: pixelated; }
+        
+        .ui-panel { position: absolute; background: rgba(15, 20, 32, 0.9); border: 2px solid #3a4b6e; border-radius: 8px; padding: 12px; color: #fff; }
+        #hud { top: 15px; left: 15px; display: flex; gap: 15px; align-items: center; pointer-events: none; }
+        .hud-card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 8px 12px; border-radius: 6px; }
+        .bar-container { width: 140px; height: 14px; background: #111; border-radius: 7px; overflow: hidden; border: 1px solid #444; margin-top: 4px; }
+        .bar-fill { height: 100%; transition: width 0.1s ease-out; }
+        
+        .menu-screen { position: absolute; inset: 0; background: rgba(8, 11, 18, 0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; z-index: 100; }
+        .hidden { display: none !important; }
+        
+        h1 { font-size: 36px; color: #4e95ff; text-shadow: 0 0 15px rgba(78,149,255,0.5); }
+        button { background: linear-gradient(180deg, #3a7bd5, #3a6073); border: none; color: #fff; padding: 12px 28px; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; }
+        button:hover { filter: brightness(1.2); }
+
+        #prompt-overlay { position: absolute; top: 20%; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 8px 16px; border-radius: 20px; border: 1px solid #4e95ff; font-weight: bold; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="gameCanvas"></canvas>
+        
+        <div id="hud" class="ui-panel">
+            <div class="hud-card">
+                <div>VIDA</div>
+                <div class="bar-container"><div id="hp-bar" class="bar-fill" style="background:#ff3b3b; width:100%;"></div></div>
+            </div>
+            <div class="hud-card">
+                <div id="wave-txt" style="font-weight:bold; color:#ffd700;">ONDA 1</div>
+                <div id="zombies-left" style="font-size:12px; color:#aaa;">Zumbis: 0</div>
+            </div>
+            <div class="hud-card">
+                <div style="color:#00ff88; font-weight:bold;">MOEDAS: <span id="coin-txt">0</span></div>
+                <div style="font-size:12px;">PONTOS: <span id="score-txt">0</span></div>
+            </div>
+            <div class="hud-card">
+                <div style="font-size:12px; color:#4e95ff;">Kits Médicos [E]: <span id="med-txt">1</span></div>
+                <div style="font-size:12px; color:#aa55ff;">Camuflagem [C]: <span id="camo-txt">0</span></div>
+            </div>
+        </div>
+
+        <div id="prompt-overlay" class="hidden">Pressione [E] para abrir o Baú</div>
+
+        <!-- Menu Principal -->
+        <div id="start-screen" class="menu-screen">
+            <h1>TERRARIA ZOMBIE PARKOUR</h1>
+            <p style="color:#8a99ad;">Sobreviva às hordas, explore casas e faça parkour!</p>
+            <button onclick="startGame()">JOGAR AGORA</button>
+        </div>
+
+        <!-- Tela de Fim de Jogo -->
+        <div id="gameover-screen" class="menu-screen hidden">
+            <h1 style="color:#ff3b3b;">VOCÊ MORREU!</h1>
+            <button onclick="startGame()">JOGAR NOVAMENTE</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        const TILE_SIZE = 32;
+        const MAP_W = 200;
+        const MAP_H = 60;
+        const GRAVITY = 0.55;
+
+        let gameState = 'START';
+        let map = [];
+        let particles = [];
+        let bullets = [];
+        let zombies = [];
+        let chests = [];
+        let score = 0;
+        let coins = 0;
+        let wave = 1;
+        let waveZombiesToSpawn = 0;
+        let spawnTimer = 0;
+
+        const player = {
+            x: 400, y: 200, w: 22, h: 42,
+            vx: 0, vy: 0,
+            speed: 5.5, jumpForce: -11.5,
+            grounded: false, wallSliding: false, wallDir: 0,
+            hp: 100, maxHp: 100,
+            medkits: 1, camoKits: 0,
+            camoTimer: 0, shootCooldown: 0
+        };
+
+        const keys = {};
+        let mouseX = 0, mouseY = 0;
+
+        window.addEventListener('keydown', e => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key === 'e' || e.key === 'E') interactChestOrHeal();
+            if (e.key === 'c' || e.key === 'C') useCamo();
+        });
+        window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+        window.addEventListener('mousemove', e => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = e.clientX - rect.left;
+            mouseY = e.clientY - rect.top;
+        });
+        window.addEventListener('mousedown', e => {
+            if (e.button === 0 && gameState === 'PLAYING') shoot();
+            if (e.button === 2 && gameState === 'PLAYING') breakTile();
+        });
+        window.addEventListener('contextmenu', e => e.preventDefault());
+
+        function generateMap() {
+            map = Array(MAP_H).fill(0).map(() => Array(MAP_W).fill(0));
+            chests = [];
+            
+            let height = 30;
+            for (let x = 0; x < MAP_W; x++) {
+                height += Math.floor(Math.sin(x * 0.1) * 1.5);
+                height = Math.max(15, Math.min(MAP_H - 15, height));
+                
+                for (let y = height; y < MAP_H; y++) {
+                    if (y === height) map[y][x] = 1; // Grama
+                    else if (y < height + 5) map[y][x] = 2; // Terra
+                    else map[y][x] = 3; // Pedra
+                }
+
+                if (x > 15 && x < MAP_W - 15 && x % 30 === 0) {
+                    buildHouse(x, height - 1);
+                }
+            }
+        }
+
+        function buildHouse(startX, groundY) {
+            const houseW = 8, houseH = 5;
+            for (let hx = 0; hx < houseW; hx++) {
+                for (let hy = 0; hy < houseH; hy++) {
+                    let tx = startX + hx;
+                    let ty = groundY - hy;
+                    if (tx >= MAP_W || ty < 0) continue;
+
+                    if (hy === 0 || hy === houseH - 1 || hx === 0 || hx === houseW - 1) {
+                        map[ty][tx] = 4; // Madeira/Tijolo
+                    } else {
+                        map[ty][tx] = 0;
+                    }
+                }
+            }
+            chests.push({ x: (startX + 3) * TILE_SIZE, y: (groundY - 1) * TILE_SIZE, w: 24, h: 20, opened: false });
+        }
+
+        function startGame() {
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('gameover-screen').classList.add('hidden');
+            generateMap();
+            player.x = 400; player.y = 200;
+            player.hp = 100; player.vx = 0; player.vy = 0;
+            player.medkits = 1; player.camoKits = 0; player.camoTimer = 0;
+            zombies = []; bullets = []; particles = [];
+            wave = 1; score = 0; coins = 0;
+            startWave();
+            gameState = 'PLAYING';
+            requestAnimationFrame(gameLoop);
+        }
+
+        function startWave() {
+            waveZombiesToSpawn = 4 + wave * 3;
+        }
+
+        function updatePlayer() {
+            if (keys['a'] || keys['arrowleft']) player.vx = -player.speed;
+            else if (keys['d'] || keys['arrowright']) player.vx = player.speed;
+            else player.vx *= 0.7;
+
+            player.vy += GRAVITY;
+
+            player.wallSliding = false;
+            let nextX = player.x + player.vx;
+            if (checkCollision(nextX, player.y, player.w, player.h)) {
+                player.wallDir = player.vx > 0 ? 1 : -1;
+                player.vx = 0;
+                if (!player.grounded && player.vy > 0) {
+                    player.wallSliding = true;
+                    player.vy = Math.min(player.vy, 2.5);
+                }
+            } else {
+                player.x = nextX;
+            }
+
+            if ((keys['w'] || keys[' '] || keys['arrowup'])) {
+                if (player.grounded) {
+                    player.vy = player.jumpForce;
+                    player.grounded = false;
+                } else if (player.wallSliding) {
+                    player.vy = player.jumpForce * 0.9;
+                    player.vx = -player.wallDir * 7;
+                    player.wallSliding = false;
+                }
+                keys['w'] = false; keys[' '] = false; keys['arrowup'] = false;
+            }
+
+            let nextY = player.y + player.vy;
+            if (checkCollision(player.x, nextY, player.w, player.h)) {
+                if (player.vy > 0) player.grounded = true;
+                player.vy = 0;
+            } else {
+                player.y = nextY;
+                player.grounded = false;
+            }
+
+            if (player.shootCooldown > 0) player.shootCooldown--;
+            if (player.camoTimer > 0) player.camoTimer--;
+        }
+
+        function checkCollision(x, y, w, h) {
+            let left = Math.floor(x / TILE_SIZE);
+            let right = Math.floor((x + w) / TILE_SIZE);
+            let top = Math.floor(y / TILE_SIZE);
+            let bottom = Math.floor((y + h) / TILE_SIZE);
+
+            for (let ty = top; ty <= bottom; ty++) {
+                for (let tx = left; tx <= right; tx++) {
+                    if (tx >= 0 && tx < MAP_W && ty >= 0 && ty < MAP_H) {
+                        if (map[ty][tx] > 0) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function shoot() {
+            if (player.shootCooldown > 0) return;
+            player.shootCooldown = 12;
+
+            let screenPx = player.x - cameraX + player.w/2;
+            let screenPy = player.y - cameraY + player.h/2;
+            let angle = Math.atan2(mouseY - screenPy, mouseX - screenPx);
+
+            bullets.push({
+                x: player.x + player.w/2,
+                y: player.y + player.h/2,
+                vx: Math.cos(angle) * 14,
+                vy: Math.sin(angle) * 14,
+                damage: 30,
+                life: 60
+            });
+        }
+
+        function breakTile() {
+            let worldX = Math.floor((mouseX + cameraX) / TILE_SIZE);
+            let worldY = Math.floor((mouseY + cameraY) / TILE_SIZE);
+            if (worldX >= 0 && worldX < MAP_W && worldY >= 0 && worldY < MAP_H) {
+                map[worldY][worldX] = 0;
+            }
+        }
+
+        function interactChestOrHeal() {
+            let openedAny = false;
+            chests.forEach(c => {
+                if (!c.opened && Math.hypot((player.x + player.w/2) - (c.x + c.w/2), (player.y + player.h/2) - (c.y + c.h/2)) < 50) {
+                    c.opened = true;
+                    openedAny = true;
+                    player.medkits += 1;
+                    player.camoKits += 1;
+                    coins += 100;
+                    createParticles(c.x, c.y, '#ffd700', 10);
+                }
+            });
+
+            if (!openedAny && player.medkits > 0 && player.hp < player.maxHp) {
+                player.medkits--;
+                player.hp = Math.min(player.maxHp, player.hp + 40);
+                createParticles(player.x, player.y, '#00ff88', 8);
+            }
+        }
+
+        function useCamo() {
+            if (player.camoKits > 0 && player.camoTimer <= 0) {
+                player.camoKits--;
+                player.camoTimer = 400;
+            }
+        }
+
+        function updateZombies() {
+            spawnTimer++;
+            if (spawnTimer > 100 && waveZombiesToSpawn > 0) {
+                spawnTimer = 0;
+                waveZombiesToSpawn--;
+                let spawnX = player.x + (Math.random() > 0.5 ? 500 : -500);
+                zombies.push({
+                    x: Math.max(50, Math.min(MAP_W * TILE_SIZE - 50, spawnX)),
+                    y: 100, w: 22, h: 42,
+                    vx: 0, vy: 0,
+                    hp: 50 + wave * 10,
+                    type: Math.random() > 0.7 ? 'fast' : 'normal'
+                });
+            }
+
+            zombies.forEach(z => {
+                let speed = z.type === 'fast' ? 3.2 : 2.0;
+                
+                if (player.camoTimer <= 0) {
+                    if (z.x < player.x) z.vx = speed;
+                    else z.vx = -speed;
+                } else {
+                    z.vx *= 0.9;
+                }
+
+                z.vy += GRAVITY;
+
+                if (checkCollision(z.x + z.vx, z.y, z.w, z.h)) {
+                    if (!checkCollision(z.x + z.vx, z.y - 32, z.w, z.h)) {
+                        z.vy = -9;
+                    } else {
+                        z.vx = 0;
+                    }
+                } else {
+                    z.x += z.vx;
+                }
+
+                if (checkCollision(z.x, z.y + z.vy, z.w, z.h)) {
+                    z.vy = 0;
+                } else {
+                    z.y += z.vy;
+                }
+
+                if (Math.abs(z.x - player.x) < 20 && Math.abs(z.y - player.y) < 30) {
+                    player.hp -= 0.5;
+                    if (player.hp <= 0) {
+                        gameState = 'GAMEOVER';
+                        document.getElementById('gameover-screen').classList.remove('hidden');
+                    }
+                }
+            });
+
+            zombies = zombies.filter(z => z.hp > 0);
+
+            if (waveZombiesToSpawn === 0 && zombies.length === 0) {
+                wave++;
+                coins += 150;
+                startWave();
+            }
+        }
+
+        function updateBullets() {
+            bullets.forEach(b => {
+                b.x += b.vx;
+                b.y += b.vy;
+                b.life--;
+
+                if (checkCollision(b.x, b.y, 4, 4)) {
+                    b.life = 0;
+                }
+
+                zombies.forEach(z => {
+                    if (b.x > z.x && b.x < z.x + z.w && b.y > z.y && b.y < z.y + z.h) {
+                        z.hp -= b.damage;
+                        b.life = 0;
+                        createParticles(b.x, b.y, '#ff2244', 5);
+                        if (z.hp <= 0) {
+                            score += 100;
+                            coins += 20;
+                        }
+                    }
+                });
+            });
+
+            bullets = bullets.filter(b => b.life > 0);
+        }
+
+        function createParticles(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                if (particles.length > 40) particles.shift();
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 6,
+                    vy: (Math.random() - 0.5) * 6,
+                    color, life: 20
+                });
+            }
+        }
+
+        let cameraX = 0, cameraY = 0;
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            cameraX = player.x - canvas.width / 2;
+            cameraY = player.y - canvas.height / 2;
+
+            let startCol = Math.max(0, Math.floor(cameraX / TILE_SIZE));
+            let endCol = Math.min(MAP_W - 1, Math.ceil((cameraX + canvas.width) / TILE_SIZE));
+            let startRow = Math.max(0, Math.floor(cameraY / TILE_SIZE));
+            let endRow = Math.min(MAP_H - 1, Math.ceil((cameraY + canvas.height) / TILE_SIZE));
+
+            for (let r = startRow; r <= endRow; r++) {
+                for (let c = startCol; c <= endCol; c++) {
+                    let tile = map[r][c];
+                    if (tile === 0) continue;
+                    let px = c * TILE_SIZE - cameraX;
+                    let py = r * TILE_SIZE - cameraY;
+
+                    if (tile === 1) ctx.fillStyle = '#4e9b4e';
+                    else if (tile === 2) ctx.fillStyle = '#7a5230';
+                    else if (tile === 3) ctx.fillStyle = '#555566';
+                    else if (tile === 4) ctx.fillStyle = '#9e472a';
+
+                    ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+                }
+            }
+
+            chests.forEach(chest => {
+                let cx = chest.x - cameraX;
+                let cy = chest.y - cameraY;
+                ctx.fillStyle = chest.opened ? '#554422' : '#ffd700';
+                ctx.fillRect(cx, cy, chest.w, chest.h);
+            });
+
+            // Player
+            ctx.fillStyle = player.camoTimer > 0 ? 'rgba(100,255,200,0.4)' : '#3a7bd5';
+            ctx.fillRect(player.x - cameraX, player.y - cameraY, player.w, player.h);
+
+            // Line aiming
+            let screenPx = player.x - cameraX + player.w/2;
+            let screenPy = player.y - cameraY + player.h/2;
+            ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+            ctx.beginPath();
+            ctx.moveTo(screenPx, screenPy);
+            ctx.lineTo(mouseX, mouseY);
+            ctx.stroke();
+
+            // Zombies
+            zombies.forEach(z => {
+                let zx = z.x - cameraX;
+                let zy = z.y - cameraY;
+                ctx.fillStyle = z.type === 'fast' ? '#b32424' : '#2d8659';
+                ctx.fillRect(zx, zy, z.w, z.h);
+
+                ctx.fillStyle = '#ff0000';
+                ctx.fillRect(zx + (z.vx >= 0 ? 14 : 2), zy + 8, 5, 5);
+            });
+
+            // Bullets
+            ctx.fillStyle = '#ffff55';
+            bullets.forEach(b => ctx.fillRect(b.x - cameraX, b.y - cameraY, 4, 4));
+
+            // Particles
+            particles.forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x - cameraX, p.y - cameraY, 3, 3);
+                p.x += p.vx; p.y += p.vy; p.life--;
+            });
+            particles = particles.filter(p => p.life > 0);
+
+            // UI
+            document.getElementById('hp-bar').style.width = Math.max(0, player.hp) + '%';
+            document.getElementById('wave-txt').innerText = 'ONDA ' + wave;
+            document.getElementById('zombies-left').innerText = 'Zumbis: ' + (zombies.length + waveZombiesToSpawn);
+            document.getElementById('coin-txt').innerText = coins;
+            document.getElementById('score-txt').innerText = score;
+            document.getElementById('med-txt').innerText = player.medkits;
+            document.getElementById('camo-txt').innerText = player.camoKits;
+
+            let nearChest = chests.some(c => !c.opened && Math.hypot((player.x + player.w/2) - (c.x + c.w/2), (player.y + player.h/2) - (c.y + c.h/2)) < 50);
+            document.getElementById('prompt-overlay').classList.toggle('hidden', !nearChest);
+        }
+
+        function gameLoop() {
+            if (gameState === 'PLAYING') {
+                updatePlayer();
+                updateZombies();
+                updateBullets();
+                render();
+                requestAnimationFrame(gameLoop);
+            }
+        }
+    </script>
+</body>
+</html>
